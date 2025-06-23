@@ -8,10 +8,10 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(tf2 REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
-find_package(sensor_msgs REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(tf2 REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -24,5 +24,13 @@ if(BUILD_TESTING)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
+
+add_executable(pid_maze_solver src/pid_maze_solver.cpp)
+ament_target_dependencies(pid_maze_solver rclcpp std_msgs geometry_msgs nav_msgs tf2 Eigen3)
+
+install(TARGETS
+  pid_maze_solver
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 ament_package()
