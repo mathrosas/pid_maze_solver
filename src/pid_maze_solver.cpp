@@ -19,8 +19,8 @@ using namespace std::chrono_literals;
 class PIDMazeSolver : public rclcpp::Node {
 public:
   PIDMazeSolver(int scene_number)
-      : Node("distance_controller"), scene_number_(scene_number) {
-    RCLCPP_INFO(get_logger(), "Distance controller node.");
+      : Node("pid_maze_solver"), scene_number_(scene_number) {
+    RCLCPP_INFO(get_logger(), "PID maze solver node.");
     // pub_ = this->create_publisher<std_msgs::msg::Float32MultiArray>(
     //     "wheel_speed", 10);
     pub_ = this->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
