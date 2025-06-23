@@ -331,39 +331,6 @@ private:
 
     return waypoints;
   }
-
-  void select_waypoints() {
-    switch (scene_number_) {
-    case 1: // Simulation
-      motions_ = {
-          {0.45, 0.0, 0.0},     // Waypoint 1
-          {0.11, -0.35, -0.80}, // Waypoint 2
-          {0.0, -1.05, -0.80},  // Waypoint 3
-          {0.55, 0.0, 1.607},   // Waypoint 4
-          {0.0, 0.65, 1.607},   // Waypoint 5
-          {0.40, 0.0, 0.0},     // Waypoint 6
-          {0.0, 0.55, 0.0},     // Waypoint 7
-          {0.55, 0.0, 0.0},     // Waypoint 8
-          {0.0, 0.84, 0.0},     // Waypoint 9
-          {-0.55, 0.0, 1.607},  // Waypoint 10
-          {0.0, -0.44, 0.0},    // Waypoint 11
-          {-0.55, 0.0, 0.0},    // Waypoint 12
-          {-0.15, 0.36, -0.80}, // Waypoint 13
-          {-0.65, 0.0, 0.80},   // Waypoint 14
-          {0.0, 0.0, -3.24}     // Waypoint 16
-      };
-      break;
-
-    case 2: // CyberWorld
-      motions_ = {
-          {1.0, 0.0, 0}, {0.0, -0.6, 0.0}, {0.0, 0.5, 0.0}, {-1.0, 0.0, 0.0}};
-      break;
-
-    default:
-      RCLCPP_ERROR(this->get_logger(), "Invalid Scene Number: %d",
-                   scene_number_);
-    }
-  }
 };
 
 int main(int argc, char **argv) {
