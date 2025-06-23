@@ -12,6 +12,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(tf2 REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -26,11 +27,18 @@ if(BUILD_TESTING)
 endif()
 
 add_executable(pid_maze_solver src/pid_maze_solver.cpp)
-ament_target_dependencies(pid_maze_solver rclcpp std_msgs geometry_msgs nav_msgs tf2 Eigen3)
+ament_target_dependencies(pid_maze_solver rclcpp std_msgs geometry_msgs nav_msgs tf2 Eigen3 yaml-cpp)
+target_link_libraries(pid_maze_solver ${YAML_CPP_LIBRARIES})
 
 install(TARGETS
   pid_maze_solver
   DESTINATION lib/${PROJECT_NAME}
+)
+install(
+  DIRECTORY
+    waypoints
+  DESTINATION
+    share/${PROJECT_NAME}/
 )
 
 ament_package()

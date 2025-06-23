@@ -14,6 +14,10 @@
 #include "eigen3/Eigen/Dense"
 #include "rosidl_runtime_c/message_initialization.h"
 
+#include "ament_index_cpp/get_package_share_directory.hpp"
+#include "yaml-cpp/yaml.h"
+#include <filesystem>
+
 using namespace std::chrono_literals;
 
 class PIDMazeSolver : public rclcpp::Node {
@@ -36,7 +40,12 @@ public:
     w_ = 0.26969 / 2.0; // half wheelbase
     l_ = 0.17000 / 2.0; // half track width
     r_ = 0.10000 / 2.0; // wheel radius
-    select_waypoints();
+
+    motions_ = readWaypointsYAML();
+    if (motions_.empty()) {
+      RCLCPP_ERROR(get_logger(), "No waypoints loaded, shutting down.");
+      rclcpp::shutdown();
+    }
   }
 
   void run() {
@@ -58,6 +67,8 @@ public:
     }
 
     auto t0 = std::chrono::steady_clock::now();
+
+    motions_ = readWaypointsYAML();
 
     for (auto [rel_x, rel_y, rel_phi] : motions_) {
       goal_phi += rel_phi;
@@ -260,6 +271,65 @@ private:
     geometry_msgs::msg::Twist twist;
     pub_->publish(twist);
     RCLCPP_INFO(get_logger(), "Stop");
+  }
+
+  std::vector<std::tuple<double, double, double>> readWaypointsYAML() {
+    std::vector<std::tuple<double, double, double>> waypoints;
+
+    // 1) locate the YAML file
+    std::string pkg_share =
+        ament_index_cpp::get_package_share_directory("pid_maze_solver");
+    std::string fname;
+    switch (scene_number_) {
+    case 1:
+      fname = "waypoints_sim.yaml";
+      break;
+    case 2:
+      fname = "waypoints_real.yaml";
+      break;
+    default:
+      RCLCPP_ERROR(get_logger(), "Invalid scene_number_: %d", scene_number_);
+      return waypoints;
+    }
+    std::string path = pkg_share + "/waypoints/" + fname;
+    RCLCPP_INFO(get_logger(), "Loading waypoints from: %s", path.c_str());
+
+    // 2) parse it
+    try {
+      YAML::Node config = YAML::LoadFile(path);
+      if (!config["waypoints"] || !config["waypoints"].IsSequence()) {
+        RCLCPP_ERROR(get_logger(), "No “waypoints” sequence in %s",
+                     path.c_str());
+        return waypoints;
+      }
+
+      for (std::size_t i = 0; i < config["waypoints"].size(); ++i) {
+        const auto &wp = config["waypoints"][i];
+        double x, y, phi;
+
+        if (wp.IsSequence() && wp.size() == 3) {
+          x = wp[0].as<double>();
+          y = wp[1].as<double>();
+          phi = wp[2].as<double>();
+        } else if (wp.IsMap()) {
+          x = wp["x"].as<double>();
+          y = wp["y"].as<double>();
+          phi = wp["phi"].as<double>();
+        } else {
+          RCLCPP_WARN(get_logger(),
+                      "Waypoint %zu has unexpected format; skipping.", i);
+          continue;
+        }
+
+        waypoints.emplace_back(x, y, phi);
+      }
+
+    } catch (const YAML::Exception &e) {
+      RCLCPP_ERROR(get_logger(), "Failed to load YAML file %s: %s",
+                   path.c_str(), e.what());
+    }
+
+    return waypoints;
   }
 
   void select_waypoints() {
