@@ -1,6 +1,7 @@
 # waypoints/waypoints_sim.yaml
 
 waypoints:
+  - [  0.00,   0.00,  0.00 ]   # Waypoint 0
   - [  0.45,   0.00,  0.00 ]   # Waypoint 1
   - [  0.11,  -0.35, -0.80 ]   # Waypoint 2
   - [  0.00,  -1.05, -0.80 ]   # Waypoint 3
@@ -13,6 +14,6 @@ waypoints:
   - [ -0.55,   0.00,  1.607]   # Waypoint 10
   - [  0.00,  -0.44,  0.00 ]   # Waypoint 11
   - [ -0.55,   0.00,  0.00 ]   # Waypoint 12
-  - [ -0.15,   0.36, -0.80 ]   # Waypoint 13
+  - [ -0.15,   0.40, -0.80 ]   # Waypoint 13
   - [ -0.65,   0.00,  0.80 ]   # Waypoint 14
   - [  0.00,   0.00, -3.24 ]   # Waypoint 15

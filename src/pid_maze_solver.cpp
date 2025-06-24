@@ -49,21 +49,28 @@ public:
   }
 
   void run() {
-    double error_phi, error_x, error_y;
-    double goal_x = 0.0, goal_y = 0.0, goal_phi = 0.0;
+    // wait until we actually have a valid odom
+    RCLCPP_INFO(get_logger(), "Waiting for first odometry…");
+    while (!odom_received_ && rclcpp::ok()) {
+      rclcpp::spin_some(shared_from_this());
+      rclcpp::sleep_for(50ms);
+    }
+    RCLCPP_INFO(get_logger(), "Got odom. Starting control loops.");
+
+    double error_phi;
+    double goal_x = x_, goal_y = y_, goal_phi = phi_;
     double Kp = 0.5, Ki = 0.0, Kd = 0.05;
     double error_phi_prev, error_dist_prev;
     double integral_phi = 0;
     double integral_dist = 0;
     double derivative_phi = 0;
-    double derivative_dist = 0;
     double PID_phi;
     double I_MAX = 1.0; // integrate clamp [–1,1]
     double V_MAX = 0.5; // max linear m/s
     double W_MAX = 1.0; // max angular rad/s
 
     while (pub_->get_subscription_count() == 0) {
-      rclcpp::sleep_for(100ms);
+      rclcpp::sleep_for(50ms);
     }
 
     auto t0 = std::chrono::steady_clock::now();
@@ -182,6 +189,8 @@ private:
 
   int scene_number_;
 
+  bool odom_received_ = false;
+
   void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
     x_ = msg->pose.pose.position.x;
     y_ = msg->pose.pose.position.y;
@@ -194,6 +203,7 @@ private:
     double roll, pitch, yaw;
     m.getRPY(roll, pitch, yaw);
     phi_ = yaw;
+    odom_received_ = true;
   }
 
   std::tuple<double, double, double>
@@ -279,19 +289,22 @@ private:
     // 1) locate the YAML file
     std::string pkg_share =
         ament_index_cpp::get_package_share_directory("pid_maze_solver");
-    std::string fname;
+    std::string waypoint_file_name;
     switch (scene_number_) {
     case 1:
-      fname = "waypoints_sim.yaml";
+      waypoint_file_name = "waypoints_sim.yaml";
       break;
     case 2:
-      fname = "waypoints_real.yaml";
+      waypoint_file_name = "waypoints_real.yaml";
+      break;
+    case 3: // Simulation Reverse
+      waypoint_file_name = "reverse_waypoints_sim.yaml";
       break;
     default:
       RCLCPP_ERROR(get_logger(), "Invalid scene_number_: %d", scene_number_);
       return waypoints;
     }
-    std::string path = pkg_share + "/waypoints/" + fname;
+    std::string path = pkg_share + "/waypoints/" + waypoint_file_name;
     RCLCPP_INFO(get_logger(), "Loading waypoints from: %s", path.c_str());
 
     // 2) parse it
