@@ -59,7 +59,7 @@ public:
 
     double error_phi;
     double goal_x = x_, goal_y = y_, goal_phi = phi_;
-    double Kp = 0.5, Ki = 0.0, Kd = 0.05;
+    double Kp = 0.5, Ki = 0.05, Kd = 0.1;
     double error_phi_prev, error_dist_prev;
     double integral_phi = 0;
     double integral_dist = 0;
@@ -184,8 +184,8 @@ private:
   double x_, y_, phi_;
   double w_, l_, r_;
 
-  double pos_tol = 0.1;
-  double ang_tol = 0.1;
+  double pos_tol = 0.01;
+  double ang_tol = 0.01;
 
   int scene_number_;
 
@@ -279,8 +279,13 @@ private:
 
   void stop() {
     geometry_msgs::msg::Twist twist;
-    pub_->publish(twist);
-    RCLCPP_INFO(get_logger(), "Stop");
+    rclcpp::Rate rate(20);
+    for (int i = 0; i < 20; ++i) {
+      pub_->publish(twist);
+      rclcpp::spin_some(shared_from_this());
+      rate.sleep();
+    }
+    RCLCPP_INFO(get_logger(), "Stop (zeroed for 0.5 s)");
   }
 
   std::vector<std::tuple<double, double, double>> readWaypointsYAML() {
