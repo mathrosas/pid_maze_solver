@@ -195,7 +195,7 @@ private:
     x_ = msg->pose.pose.position.x;
     y_ = msg->pose.pose.position.y;
 
-    // Extract yaw (φ) from quaternion
+    // Extract yaw (phi) from quaternion
     tf2::Quaternion q(
         msg->pose.pose.orientation.x, msg->pose.pose.orientation.y,
         msg->pose.pose.orientation.z, msg->pose.pose.orientation.w);
@@ -208,8 +208,9 @@ private:
 
   std::tuple<double, double, double>
   velocity2twist(double error_phi, double error_x, double error_y) {
-    // Build rotation matrix R(φ)
+    // Build rotation matrix R(phi)
     Eigen::Matrix3d R;
+
     R << 1, 0, 0, 0, std::cos(phi_), std::sin(phi_), 0, -std::sin(phi_),
         std::cos(phi_);
 
