@@ -85,7 +85,7 @@ public:
 
       // **2) main control loop**
       // Main PID loop: until we reach the angular tolerance
-      while (std::abs(goal_phi - phi_) > ang_tol) {
+      while (std::abs(goal_phi - phi_) > ang_tol && (rel_phi != 0.0)) {
         // ——— timing ———
         auto t1 = std::chrono::steady_clock::now();
         double dt = std::chrono::duration<double>(t1 - t0).count();
