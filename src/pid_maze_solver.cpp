@@ -158,11 +158,11 @@ public:
         double vx_w = v * ux;
         double vy_w = v * uy;
 
-        // ** transform into body frame **
+        // transform into body frame
         auto [wz_body, vx_body, vy_body] = velocity2twist(0.0, vx_w, vy_w);
 
         // holonomic drive -> wheel speeds -> publish
-        auto wheels = twist2wheels(wz_body, vx_body, vy_body);
+        auto wheels = twist2wheels(0.0, vx_body, vy_body);
         wheels2twist(wheels);
 
         rclcpp::spin_some(shared_from_this());
