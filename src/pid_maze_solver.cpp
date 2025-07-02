@@ -36,11 +36,6 @@ public:
     //     std::bind(&PIDMazeSolver::odom_callback, this,
     //               std::placeholders::_1));
 
-    // Robot geometry
-    w_ = 0.26969 / 2.0; // half wheelbase
-    l_ = 0.17000 / 2.0; // half track width
-    r_ = 0.10000 / 2.0; // wheel radius
-
     motions_ = readWaypointsYAML();
     if (motions_.empty()) {
       RCLCPP_ERROR(get_logger(), "No waypoints loaded, shutting down.");
@@ -66,8 +61,10 @@ public:
     double derivative_phi = 0;
     double PID_phi;
     double I_MAX = 1.0; // integrate clamp [–1,1]
-    double V_MAX = 0.5; // max linear m/s
-    double W_MAX = 1.0; // max angular rad/s
+    double V_MAX = 0.4; // max linear m/s
+    double W_MAX = 0.4; // max angular rad/s
+
+    geometry_msgs::msg::Twist twist;
 
     while (pub_->get_subscription_count() == 0) {
       rclcpp::sleep_for(50ms);
@@ -114,13 +111,12 @@ public:
         // ——— save for next step ———
         error_phi_prev = error_phi;
 
-        // ——— publish via holonomic pipeline ———
-        //  1) world->body twist
-        auto [wz, vx, vy] = velocity2twist(PID_phi, 0.0, 0.0);
-        //  2) twist->wheel speeds
-        auto wheels = twist2wheels(wz, 0.0, 0.0);
-        //  3) wheel speeds->safe Twist & publish
-        wheels2twist(wheels);
+        twist.linear.x = 0.0;
+        twist.linear.y = 0.0;
+        twist.angular.z = PID_phi;
+
+        // Publish to /cmd_vel
+        pub_->publish(twist);
 
         rclcpp::spin_some(shared_from_this());
         rclcpp::sleep_for(25ms);
@@ -155,15 +151,18 @@ public:
         // world-frame unit vector
         double ux = ex / dist;
         double uy = ey / dist;
-        double vx_w = v * ux;
-        double vy_w = v * uy;
+        double vx = v * ux;
+        double vy = v * uy;
 
-        // transform into body frame
-        auto [wz_body, vx_body, vy_body] = velocity2twist(0.0, vx_w, vy_w);
+        double vx_body = std::cos(phi_) * vx + std::sin(phi_) * vy;
+        double vy_body = -std::sin(phi_) * vx + std::cos(phi_) * vy;
 
-        // holonomic drive -> wheel speeds -> publish
-        auto wheels = twist2wheels(0.0, vx_body, vy_body);
-        wheels2twist(wheels);
+        twist.linear.x = vx_body;
+        twist.linear.y = vy_body;
+        twist.angular.z = 0.0;
+
+        // Publish to /cmd_vel
+        pub_->publish(twist);
 
         rclcpp::spin_some(shared_from_this());
         rclcpp::sleep_for(25ms);
@@ -204,78 +203,6 @@ private:
     m.getRPY(roll, pitch, yaw);
     phi_ = yaw;
     odom_received_ = true;
-  }
-
-  std::tuple<double, double, double>
-  velocity2twist(double error_phi, double error_x, double error_y) {
-    // Build rotation matrix R(phi)
-    Eigen::Matrix3d R;
-
-    R << 1, 0, 0, 0, std::cos(phi_), std::sin(phi_), 0, -std::sin(phi_),
-        std::cos(phi_);
-
-    Eigen::Vector3d v(error_phi, error_x, error_y);
-    Eigen::Vector3d twist = R * v;
-
-    // twist[0]=wz, twist[1]=vx, twist[2]=vy
-    return std::make_tuple(twist(0), twist(1), twist(2));
-  }
-
-  std::vector<float> twist2wheels(double wz, double vx, double vy) {
-    // H matrix (4×3)
-    Eigen::Matrix<double, 4, 3> H;
-    H << -l_ - w_, 1, -1, l_ + w_, 1, 1, l_ + w_, 1, -1, -l_ - w_, 1, 1;
-    H /= r_;
-
-    Eigen::Vector3d twist(wz, vx, vy);
-    Eigen::Matrix<double, 4, 1> u = H * twist;
-
-    // cast each wheel speed to float
-    return {static_cast<float>(u(0, 0)), static_cast<float>(u(1, 0)),
-            static_cast<float>(u(2, 0)), static_cast<float>(u(3, 0))};
-  }
-
-  void wheels2twist(std::vector<float> wheels) {
-    // Holonomic drive matrix H_ (4x3): maps wheel velocities [ω, vx, vy] to
-    // wheel speeds
-    Eigen::Matrix<float, 4, 3> H_;
-    H_ << -l_ - w_, 1, -1, l_ + w_, 1, 1, l_ + w_, 1, -1, -l_ - w_, 1, 1;
-    // Scale by wheel radius
-    H_ /= r_;
-
-    // Wheel speeds vector U (4x1)
-    Eigen::Matrix<float, 4, 1> U;
-    U << wheels[0], wheels[1], wheels[2], wheels[3];
-
-    // Compute pseudoinverse of H_ via SVD: H_pinv (3x4)
-    Eigen::JacobiSVD<Eigen::Matrix<float, 4, 3>> svd(
-        H_, Eigen::ComputeFullU | Eigen::ComputeFullV);
-    const auto &S = svd.singularValues();
-    Eigen::Matrix<float, 3, 4> S_pinv = Eigen::Matrix<float, 3, 4>::Zero();
-    const float tol = 1e-6f;
-    for (int i = 0; i < S.size(); ++i) {
-      if (S(i) > tol) {
-        S_pinv(i, i) = 1.0 / S(i);
-      }
-    }
-    Eigen::Matrix<float, 3, 4> H_pinv =
-        svd.matrixV() * S_pinv * svd.matrixU().transpose();
-
-    // Compute wheel velocities: [ω, vx, vy] = H_pinv * U
-    Eigen::Matrix<float, 3, 1> wheel_vel = H_pinv * U;
-
-    // Convert to Twist message
-    geometry_msgs::msg::Twist twist;
-    twist.angular.z = wheel_vel(0);
-    twist.linear.x = wheel_vel(1);
-    twist.linear.y = wheel_vel(2);
-
-    RCLCPP_INFO(get_logger(),
-                "Computed wheel velocities w: %.3f, vx: %.3f, vy: %.3f",
-                wheel_vel(0), wheel_vel(1), wheel_vel(2));
-
-    // Publish to /cmd_vel
-    pub_->publish(twist);
   }
 
   void stop() {
