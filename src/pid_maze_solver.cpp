@@ -235,11 +235,16 @@ private:
     last_left_dist_ = get_sector_distance(left_idx, sector_width);
     last_back_dist_ = get_sector_distance(back_idx, sector_width);
 
-    const float min_safe_dist =
-        0.22f; // I chose this distance, because 23-24
-               // was the exact middle of the road and I
-               // wanted a little more of space to work with
-    const float move_distance = 0.1f;
+    float min_safe_dist = 0.22f; // I chose this distance because 22-24
+                                 // was the exact middle of the road and I
+                                 // wanted a little more of space to work with
+    float move_distance = 0.1f;
+    if (scene_number_ == 2 || scene_number_ == 4) {
+      min_safe_dist = 0.21f; // I chose this distance because 21-22
+                             // was the exact middle of the road and I
+                             // wanted a little more of space to work with
+      move_distance = 0.05f;
+    }
 
     // Front too close - move backward and turn
     if (last_front_dist_ < min_safe_dist) {
