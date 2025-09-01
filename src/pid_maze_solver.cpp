@@ -1,334 +1,353 @@
-#include <algorithm>
-#include <chrono>
+#include <Eigen/Dense>
+#include <array>
 #include <cmath>
-#include <iomanip>
-#include <memory>
-#include <sstream>
-#include <thread>
-#include <vector>
-
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
-
+#include <std_msgs/msg/float32_multi_array.hpp>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
-
-#include "eigen3/Eigen/Dense"
-#include "rosidl_runtime_c/message_initialization.h"
-
-#include "ament_index_cpp/get_package_share_directory.hpp"
-#include "yaml-cpp/yaml.h"
-#include <filesystem>
+#include <tf2/impl/utils.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
+#include <yaml-cpp/yaml.h>
 
 using namespace std::chrono_literals;
 
-class PIDMazeSolver : public rclcpp::Node {
+class MazeSolver : public rclcpp::Node {
 public:
-  PIDMazeSolver(int scene_number)
-      : Node("pid_maze_solver"), scene_number_(scene_number) {
-    RCLCPP_INFO(get_logger(),
-                "PID maze solver node with 360° obstacle avoidance.");
-
-    pub_ = this->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
+  MazeSolver(int scene_number)
+      : Node("pid_maze_solver"), scene_number_(scene_number), got_odom_(false),
+        turn_phase_(false), wp_reached_(false), init_(true), paused_(false),
+        target_wp_(0) {
+    twist_pub_ =
+        this->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
     odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
         "/odometry/filtered", 10,
-        std::bind(&PIDMazeSolver::odom_callback, this, std::placeholders::_1));
+        std::bind(&MazeSolver::odomCallback, this, std::placeholders::_1));
     scan_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
-        "/scan", 10,
-        std::bind(&PIDMazeSolver::scan_callback, this, std::placeholders::_1));
+        "/scan_filtered", 10,
+        std::bind(&MazeSolver::scanCallback, this, std::placeholders::_1));
+    timer_ = this->create_wall_timer(
+        200ms, std::bind(&MazeSolver::executeCallback, this));
 
-    motions_ = readWaypointsYAML();
-    if (motions_.empty()) {
-      RCLCPP_ERROR(get_logger(), "No waypoints loaded, shutting down.");
-      rclcpp::shutdown();
-    }
-  }
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
-  void run() {
-    while ((!odom_received_ || !scan_received_) && rclcpp::ok()) {
-      rclcpp::spin_some(shared_from_this());
-      rclcpp::sleep_for(50ms);
-    }
-
-    double error_phi;
-    double goal_x = x_, goal_y = y_, goal_phi = phi_;
-    double Kp = 0.5, Ki = 0.05, Kd = 0.1;
-    double error_phi_prev = 0, error_dist_prev = 0;
-    double integral_phi = 0, integral_dist = 0;
-    const double I_MAX = 1.0;
-    const double V_MAX = 0.4;
-    const double W_MAX = 0.4;
-
-    geometry_msgs::msg::Twist twist;
-
-    while (pub_->get_subscription_count() == 0) {
-      rclcpp::sleep_for(50ms);
-    }
-
-    auto t0 = std::chrono::steady_clock::now();
-
-    for (auto [rel_x, rel_y, rel_phi] : motions_) {
-      goal_phi += rel_phi;
-      goal_x += rel_x;
-      goal_y += rel_y;
-
-      error_dist_prev = error_phi_prev = 0.0;
-      integral_dist = integral_phi = 0.0;
-
-      // Rotation control
-      while (std::abs(goal_phi - phi_) > ang_tol && (rel_phi != 0.0)) {
-        auto t1 = std::chrono::steady_clock::now();
-        double dt = std::chrono::duration<double>(t1 - t0).count();
-        t0 = t1;
-        if (dt <= 0.0)
-          dt = 1e-3;
-
-        error_phi = goal_phi - phi_;
-        integral_phi = std::clamp(integral_phi + error_phi * dt, -I_MAX, I_MAX);
-        double derivative_phi = (error_phi - error_phi_prev) / dt;
-        double PID_phi =
-            Kp * error_phi + Ki * integral_phi + Kd * derivative_phi;
-        PID_phi = std::clamp(PID_phi, -W_MAX, W_MAX);
-        error_phi_prev = error_phi;
-
-        twist.linear.x = 0.0;
-        twist.linear.y = 0.0;
-        twist.angular.z = PID_phi;
-
-        apply_course_correction(twist);
-        pub_->publish(twist);
-
-        RCLCPP_INFO(get_logger(),
-                    "angle_error=%.3f -> w_cmd=%.3f | Walls: Front:%.2fm "
-                    "Left:%.2fm Right:%.2fm Back:%.2fm",
-                    error_phi, twist.angular.z, last_front_dist_,
-                    last_left_dist_, last_right_dist_, last_back_dist_);
-
-        rclcpp::spin_some(shared_from_this());
-        rclcpp::sleep_for(25ms);
-      }
-
-      // Translation control
-      while (true) {
-        auto t1 = std::chrono::steady_clock::now();
-        double dt = std::chrono::duration<double>(t1 - t0).count();
-        t0 = t1;
-        if (dt <= 0)
-          dt = 1e-3;
-
-        double ex = goal_x - x_;
-        double ey = goal_y - y_;
-        double dist = std::hypot(ex, ey);
-        if (dist <= pos_tol)
-          break;
-
-        integral_dist = std::clamp(integral_dist + dist * dt, -I_MAX, I_MAX);
-        double derivative_dist = (dist - error_dist_prev) / dt;
-        double v = Kp * dist + Ki * integral_dist + Kd * derivative_dist;
-        v = std::clamp(v, -V_MAX, V_MAX);
-        error_dist_prev = dist;
-
-        double ux = ex / dist;
-        double uy = ey / dist;
-        double vx_body = std::cos(phi_) * v * ux + std::sin(phi_) * v * uy;
-        double vy_body = -std::sin(phi_) * v * ux + std::cos(phi_) * v * uy;
-
-        twist.linear.x = vx_body;
-        twist.linear.y = vy_body;
-        twist.angular.z = 0.0;
-
-        apply_course_correction(twist);
-        pub_->publish(twist);
-
-        RCLCPP_INFO(
-            get_logger(),
-            "dist=%.2f -> v=%.2f (vx=%.2f, vy=%.2f) | Walls: Front:%.2fm "
-            "Left:%.2fm Right:%.2fm Back:%.2fm",
-            dist, v, twist.linear.x, twist.linear.y, last_front_dist_,
-            last_left_dist_, last_right_dist_, last_back_dist_);
-
-        rclcpp::spin_some(shared_from_this());
-        rclcpp::sleep_for(25ms);
-      }
-
-      stop();
-    }
+    SelectWaypoints();
+    clock_ = std::make_shared<rclcpp::Clock>(RCL_ROS_TIME);
   }
 
 private:
-  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr pub_;
+  void SelectWaypoints() {
+    // Waypoints [dx, dy, dphi] in robot frame
+    switch (scene_number_) {
+
+    case 1: { // Simulation
+      std::string yaml_path =
+          "/home/user/ros2_ws/src/pid_maze_solver/waypoints/waypoints_sim.yaml";
+      YAML::Node config = YAML::LoadFile(yaml_path);
+      auto waypoints =
+          config["pid_maze_solver"]["ros__parameters"]["waypoints_sim"];
+      for (size_t i = 0; i < 14; ++i) {
+        waypoints_[i] = Eigen::Vector3f(waypoints[i * 3].as<float>(),
+                                        waypoints[i * 3 + 1].as<float>(),
+                                        waypoints[i * 3 + 2].as<float>());
+      }
+      break;
+    }
+    case 2: { // CyberWorld
+      std::string yaml_path = "/home/user/ros2_ws/src/pid_maze_solver/"
+                              "waypoints/waypoints_real.yaml";
+      YAML::Node config = YAML::LoadFile(yaml_path);
+      auto waypoints =
+          config["pid_maze_solver"]["ros__parameters"]["waypoints_real"];
+      for (size_t i = 0; i < 14; ++i) {
+        waypoints_[i] = Eigen::Vector3f(waypoints[i * 3].as<float>(),
+                                        waypoints[i * 3 + 1].as<float>(),
+                                        waypoints[i * 3 + 2].as<float>());
+      }
+      break;
+    }
+
+    case 3: { // Simulation reverse
+      std::string yaml_path =
+          "/home/user/ros2_ws/src/pid_maze_solver/waypoints/"
+          "reverse_waypoints_sim.yaml";
+      YAML::Node config = YAML::LoadFile(yaml_path);
+      auto waypoints =
+          config["pid_maze_solver"]["ros__parameters"]["waypoints_sim"];
+      for (size_t i = 0; i < 14; ++i) {
+        waypoints_[i] = Eigen::Vector3f(waypoints[i * 3].as<float>(),
+                                        waypoints[i * 3 + 1].as<float>(),
+                                        waypoints[i * 3 + 2].as<float>());
+      }
+      break;
+    }
+    case 4: { // CyberWorld reverse
+      std::string yaml_path =
+          "/home/user/ros2_ws/src/pid_maze_solver/waypoints/"
+          "reverse_waypoints_real.yaml";
+      YAML::Node config = YAML::LoadFile(yaml_path);
+      auto waypoints =
+          config["pid_maze_solver"]["ros__parameters"]["waypoints_real"];
+      for (size_t i = 0; i < 14; ++i) {
+        waypoints_[i] = Eigen::Vector3f(waypoints[i * 3].as<float>(),
+                                        waypoints[i * 3 + 1].as<float>(),
+                                        waypoints[i * 3 + 2].as<float>());
+      }
+      break;
+    }
+    default:
+      RCLCPP_ERROR(this->get_logger(), "Invalid Scene Number: %d",
+                   scene_number_);
+    }
+  }
+
+  void odomCallback(const nav_msgs::msg::Odometry::SharedPtr /*msg*/) {
+    // Use tf2 to get transform from odom to base_link
+    geometry_msgs::msg::TransformStamped transformStamped;
+    try {
+      transformStamped =
+          tf_buffer_->lookupTransform("odom", "base_link", tf2::TimePointZero);
+
+      // Translation
+      current_pose_(0) = transformStamped.transform.translation.x;
+      current_pose_(1) = transformStamped.transform.translation.y;
+
+      // Yaw from quaternion
+      tf2::Quaternion q(transformStamped.transform.rotation.x,
+                        transformStamped.transform.rotation.y,
+                        transformStamped.transform.rotation.z,
+                        transformStamped.transform.rotation.w);
+      current_pose_(2) = tf2::impl::getYaw(q);
+
+      got_odom_ = true;
+    } catch (tf2::TransformException &ex) {
+      RCLCPP_WARN(this->get_logger(), "Could not transform odom->base_link: %s",
+                  ex.what());
+      got_odom_ = false;
+    }
+  }
+
+  void scanCallback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
+    laser_ranges_ = msg->ranges;
+  }
+
+  void executeCallback() {
+    if (!got_odom_) {
+      RCLCPP_WARN(this->get_logger(), "Odom data not received!");
+      return;
+    }
+    if (laser_ranges_.empty()) {
+      RCLCPP_WARN(this->get_logger(), "Scan data missing!!");
+      return;
+    }
+
+    // Paused state
+    if (paused_) {
+      rclcpp::Time now = clock_->now();
+      // Check if 2 seconds have elapsed
+      if ((now - pause_time_).seconds() >= 2.0) {
+        paused_ = false;
+      } else {
+        auto msg = geometry_msgs::msg::Twist();
+        twist_pub_->publish(msg);
+        return;
+      }
+    }
+
+    // Update target waypoint
+    if (wp_reached_ || init_) {
+      target_pose_ = current_pose_ + waypoints_[target_wp_];
+      wp_reached_ = false;
+      init_ = false;
+      size_t twp = target_wp_ + 1;
+      RCLCPP_INFO(this->get_logger(), "Moving to next waypoint: %ld", twp);
+    }
+
+    // Error vector
+    Eigen::Vector3f error_pose = target_pose_ - current_pose_;
+    if (error_pose(2) > M_PI) {
+      error_pose(2) -= 2 * M_PI;
+    } else if (error_pose(2) < -M_PI) {
+      error_pose(2) += 2 * M_PI;
+    }
+
+    // Check distance to target waypoint
+    if (std::hypot(error_pose(0), error_pose(1)) < 0.02) {
+      auto msg = geometry_msgs::msg::Twist();
+      twist_pub_->publish(msg);
+
+      if (std::abs(error_pose(2)) > 0.02) {
+        // PID Controller - Angular
+        integral_error_(2) += error_pose(2);
+        integral_error_(2) =
+            std::clamp(integral_error_(2), -int_limit_, int_limit_);
+
+        float omega = Kp_ * error_pose(2) +
+                      Kd_ * (error_pose(2) - prev_error_(2)) +
+                      Ki_ * integral_error_(2);
+        prev_error_(2) = error_pose(2);
+
+        // Publish velocities
+        auto cmd_vel = geometry_msgs::msg::Twist();
+        cmd_vel.angular.z = std::clamp(omega, -max_ang_vel_, max_ang_vel_);
+        twist_pub_->publish(cmd_vel);
+      } else {
+        prev_error_ = {0.0, 0.0, 0.0};
+        integral_error_ = {0.0, 0.0, 0.0};
+        wp_reached_ = true;
+        target_wp_++;
+
+        if (target_wp_ >= waypoints_.size()) {
+          RCLCPP_INFO(this->get_logger(), "Maze finished!");
+          rclcpp::shutdown();
+        } else {
+          // Start the pause timer
+          pause_time_ = clock_->now();
+          paused_ = true;
+          RCLCPP_INFO(this->get_logger(),
+                      "Waypoint reached, stopping briefly...");
+        }
+      }
+      return;
+    }
+
+    // PID Controller - Linear
+    integral_error_ += error_pose;
+    integral_error_(0) =
+        std::clamp(integral_error_(0), -int_limit_, int_limit_);
+    integral_error_(1) =
+        std::clamp(integral_error_(1), -int_limit_, int_limit_);
+
+    Eigen::Vector3f V = Kp_ * error_pose + Kd_ * (error_pose - prev_error_) +
+                        Ki_ * integral_error_;
+    prev_error_ = error_pose;
+
+    // Transpose velocity command vector into robot frame
+    V = recomputeTwist(V);
+
+    // Apply simple obstacle avoidance
+    // if (std::abs(V(0)) > 0.01 || std::abs(V(1)) > 0.01) {
+    V = performObstacleAvoidance(V);
+    // }
+
+    // Publish linear velocities
+    auto cmd_vel = geometry_msgs::msg::Twist();
+    cmd_vel.linear.x = std::clamp(V(0), -max_lin_vel_, max_lin_vel_);
+    cmd_vel.linear.y = std::clamp(V(1), -max_lin_vel_, max_lin_vel_);
+    cmd_vel.angular.z = 0.0;
+
+    twist_pub_->publish(cmd_vel);
+  }
+
+  Eigen::Vector3f recomputeTwist(const Eigen::Vector3f &V) {
+
+    float dphi = current_pose_(2);
+    Eigen::Matrix3f R{{std::cos(dphi), std::sin(dphi), 0.0},
+                      {-std::sin(dphi), std::cos(dphi), 0.0},
+                      {0.0, 0.0, 1.0}};
+    Eigen::Vector3f nu = R * V;
+    return nu;
+  }
+
+  Eigen::Vector3f performObstacleAvoidance(const Eigen::Vector3f &cmd_vel) {
+
+    const float front = laser_ranges_[0];
+    const float left = laser_ranges_[179];
+    const float back = laser_ranges_[359];
+    const float right = laser_ranges_[579];
+
+    const float min_valid = 0.05;
+    const float max_valid = 5.0;
+    const float critical_dist = 0.21;
+
+    bool left_valid = (left > min_valid && left < max_valid);
+    bool right_valid = (right > min_valid && right < max_valid);
+    bool back_valid = (back > min_valid && back < max_valid);
+    bool front_valid = (front > min_valid && front < max_valid);
+
+    Eigen::Vector3f vel_update = cmd_vel;
+    Eigen::Vector2f target_correction = Eigen::Vector2f::Zero();
+
+    // Perform course correction
+    if (left_valid && left < critical_dist) {
+      RCLCPP_WARN(this->get_logger(), "Course correcting to right...");
+      vel_update(1) -= 0.05;
+      target_correction(1) -= 0.003; // update target to right
+
+    } else if (right_valid && right < critical_dist - 0.01) {
+      RCLCPP_WARN(this->get_logger(), "Course correcting to left...");
+      vel_update(1) += 0.05;
+      target_correction(1) += 0.003; // update target to left
+    }
+
+    // Perform wall avoidance
+    if (front_valid && front < critical_dist - 0.01) {
+      RCLCPP_WARN(this->get_logger(), "Avoiding front wall...");
+      vel_update(0) = -0.05;
+      target_correction(0) -= 0.003; // update target to back
+
+    } else if (back_valid && back < critical_dist + 0.02) {
+      RCLCPP_WARN(this->get_logger(), "Avoiding back wall...");
+      vel_update(0) = 0.05;
+      target_correction(0) += 0.003; // update target to front
+    }
+
+    // Transform corrections
+    if (target_correction.norm() > 0.0) {
+      const float dphi = current_pose_(2);
+      Eigen::Matrix2f R{{std::cos(dphi), std::sin(dphi)},
+                        {-std::sin(dphi), std::cos(dphi)}};
+      Eigen::Vector2f tranformed_target = R * target_correction;
+      target_pose_.head<2>() += tranformed_target;
+    }
+
+    return vel_update;
+  }
+
+  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr twist_pub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
-  std::vector<std::tuple<double, double, double>> motions_;
-  std::vector<float> scan_ranges_;
-  sensor_msgs::msg::LaserScan::SharedPtr scan_msg_;
-
-  double x_ = 0, y_ = 0, phi_ = 0;
-  float last_front_dist_ = 0.0;
-  float last_left_dist_ = 0.0;
-  float last_right_dist_ = 0.0;
-  float last_back_dist_ = 0.0;
-  const double pos_tol = 0.01;
-  const double ang_tol = 0.01;
-
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+  rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::Time pause_time_;
   int scene_number_;
-  bool odom_received_ = false;
-  bool scan_received_ = false;
+  bool got_odom_, turn_phase_, wp_reached_, init_, paused_;
+  size_t target_wp_;
+  std::shared_ptr<rclcpp::Clock> clock_;
+  Eigen::Vector3f current_pose_{0.0, 0.0, 0.0};
+  Eigen::Vector3f target_pose_{0.0, 0.0, 0.0};
+  Eigen::Vector3f prev_error_{0.0, 0.0, 0.0};
+  Eigen::Vector3f integral_error_{0.0, 0.0, 0.0};
+  std::array<Eigen::Vector3f, 14> waypoints_;
+  std::vector<float> laser_ranges_;
 
-  void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
-    x_ = msg->pose.pose.position.x;
-    y_ = msg->pose.pose.position.y;
-    tf2::Quaternion q(
-        msg->pose.pose.orientation.x, msg->pose.pose.orientation.y,
-        msg->pose.pose.orientation.z, msg->pose.pose.orientation.w);
-    tf2::Matrix3x3 m(q);
-    double roll, pitch, yaw;
-    m.getRPY(roll, pitch, yaw);
-    phi_ = yaw;
-    odom_received_ = true;
-  }
-
-  void scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
-    scan_msg_ = msg;
-    scan_ranges_ = msg->ranges;
-    scan_received_ = true;
-  }
-
-  float get_sector_distance(int center_idx, int width) {
-    int start = std::max(0, center_idx - width);
-    int end =
-        std::min(static_cast<int>(scan_ranges_.size()) - 1, center_idx + width);
-    return *std::min_element(scan_ranges_.begin() + start,
-                             scan_ranges_.begin() + end + 1);
-  }
-
-  void apply_course_correction(geometry_msgs::msg::Twist &twist) {
-    if (!scan_received_ || scan_ranges_.empty() || !scan_msg_)
-      return;
-
-    float angle_min = scan_msg_->angle_min;
-    float angle_increment = scan_msg_->angle_increment;
-
-    // Front sector (directly ahead)
-    int front_idx = static_cast<int>((M_PI - angle_min) / angle_increment);
-
-    // Right sector (90° right)
-    int right_idx = static_cast<int>((M_PI_2 - angle_min) / angle_increment);
-
-    // Left sector (90° left)
-    int left_idx = static_cast<int>((-M_PI_2 - angle_min) / angle_increment);
-
-    // Back sector (directly behind)
-    int back_idx = static_cast<int>((0.0 - angle_min) / angle_increment);
-
-    int max_idx = static_cast<int>(scan_ranges_.size()) - 1;
-    front_idx = std::clamp(front_idx, 0, max_idx);
-    right_idx = std::clamp(right_idx, 0, max_idx);
-    left_idx = std::clamp(left_idx, 0, max_idx);
-    back_idx = std::clamp(back_idx, 0, max_idx);
-
-    const int sector_width = 5;
-    last_front_dist_ = get_sector_distance(front_idx, sector_width);
-    last_right_dist_ = get_sector_distance(right_idx, sector_width);
-    last_left_dist_ = get_sector_distance(left_idx, sector_width);
-    last_back_dist_ = get_sector_distance(back_idx, sector_width);
-
-    float min_safe_dist = 0.22f; // I chose this distance because 22-24
-                                 // was the exact middle of the road and I
-                                 // wanted a little more of space to work with
-    float move_distance = 0.1f;
-    if (scene_number_ == 2 || scene_number_ == 4) {
-      min_safe_dist = 0.21f; // I chose this distance because 21-22
-                             // was the exact middle of the road and I
-                             // wanted a little more of space to work with
-      move_distance = 0.05f;
-    }
-
-    // Front too close - move backward and turn
-    if (last_front_dist_ < min_safe_dist) {
-      twist.linear.x = -move_distance;
-      twist.linear.y = 0.0;
-    }
-    // Right too close - move left
-    else if (last_right_dist_ < min_safe_dist) {
-      twist.linear.x = 0.0;
-      twist.linear.y = move_distance;
-      twist.angular.z = 0.0;
-    }
-    // Left too close - move right
-    else if (last_left_dist_ < min_safe_dist) {
-      twist.linear.x = 0.0;
-      twist.linear.y = -move_distance;
-      twist.angular.z = 0.0;
-    }
-    // Back too close - move forward
-    else if (last_back_dist_ < min_safe_dist) {
-      twist.linear.x = move_distance;
-      twist.linear.y = 0.0;
-      twist.angular.z = 0.0;
-    }
-  }
-
-  void stop() {
-    geometry_msgs::msg::Twist twist;
-    rclcpp::Rate rate(20);
-    for (int i = 0; i < 20; ++i) {
-      pub_->publish(twist);
-      rclcpp::spin_some(shared_from_this());
-      rate.sleep();
-    }
-  }
-
-  std::vector<std::tuple<double, double, double>> readWaypointsYAML() {
-    std::vector<std::tuple<double, double, double>> waypoints;
-    std::string pkg_share =
-        ament_index_cpp::get_package_share_directory("pid_maze_solver");
-    std::string waypoint_file_name;
-
-    switch (scene_number_) {
-    case 1:
-      waypoint_file_name = "waypoints_sim.yaml";
-      break;
-    case 2:
-      waypoint_file_name = "waypoints_real.yaml";
-      break;
-    case 3:
-      waypoint_file_name = "reverse_waypoints_sim.yaml";
-      break;
-    default:
-      RCLCPP_ERROR(get_logger(), "Invalid scene_number_: %d", scene_number_);
-      return waypoints;
-    }
-
-    std::string path = pkg_share + "/waypoints/" + waypoint_file_name;
-
-    try {
-      YAML::Node config = YAML::LoadFile(path);
-      if (!config["waypoints"])
-        return waypoints;
-
-      for (std::size_t i = 0; i < config["waypoints"].size(); ++i) {
-        const auto &wp = config["waypoints"][i];
-        double x = wp[0].as<double>();
-        double y = wp[1].as<double>();
-        double phi = wp[2].as<double>();
-        waypoints.emplace_back(x, y, phi);
-      }
-    } catch (const YAML::Exception &e) {
-      RCLCPP_ERROR(get_logger(), "YAML error: %s", e.what());
-    }
-
-    return waypoints;
-  }
+  // PID Gains
+  const float Kp_ = 0.35;
+  const float Ki_ = 0.005, int_limit_ = 5.0;
+  const float Kd_ = 0.32;
+  const float max_lin_vel_ = 0.18;
+  const float max_ang_vel_ = 0.5;
 };
 
 int main(int argc, char **argv) {
   rclcpp::init(argc, argv);
-  auto node =
-      std::make_shared<PIDMazeSolver>(argc > 1 ? std::atoi(argv[1]) : 1);
-  node->run();
+
+  // Check if a scene number argument is provided
+  int scene_number = 4; // Default scene number to reverse-cyberworld
+  if (argc > 1) {
+    scene_number = std::atoi(argv[1]);
+  }
+
+  auto controller_node = std::make_shared<MazeSolver>(scene_number);
+  rclcpp::executors::MultiThreadedExecutor executor;
+  executor.add_node(controller_node);
+  executor.spin();
+
   rclcpp::shutdown();
   return 0;
 }

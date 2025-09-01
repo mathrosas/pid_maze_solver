@@ -8,13 +8,17 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
-find_package(Eigen3 REQUIRED)
-find_package(tf2 REQUIRED)
-find_package(yaml-cpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
-find_package(ament_index_cpp REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(yaml-cpp REQUIRED)
+
+include_directories(
+  ${EIGEN3_INCLUDE_DIR}
+)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -29,18 +33,25 @@ if(BUILD_TESTING)
 endif()
 
 add_executable(pid_maze_solver src/pid_maze_solver.cpp)
-ament_target_dependencies(pid_maze_solver rclcpp std_msgs geometry_msgs nav_msgs tf2 Eigen3 yaml-cpp sensor_msgs ament_index_cpp)
-target_link_libraries(pid_maze_solver ${YAML_CPP_LIBRARIES})
+ament_target_dependencies(pid_maze_solver rclcpp std_msgs geometry_msgs sensor_msgs nav_msgs tf2 tf2_ros yaml-cpp)
+
+target_link_libraries(pid_maze_solver yaml-cpp)
 
 install(TARGETS
-  pid_maze_solver
-  DESTINATION lib/${PROJECT_NAME}
+   pid_maze_solver
+   DESTINATION lib/${PROJECT_NAME}
 )
+# install(DIRECTORY
+#   launch
+#   config
+#   DESTINATION share/${PROJECT_NAME}/
+# )
 install(
-  DIRECTORY
-    waypoints
-  DESTINATION
-    share/${PROJECT_NAME}/
+  FILES waypoints/waypoints_sim.yaml
+  FILES waypoints/waypoints_real.yaml
+  FILES waypoints/reverse_waypoints_sim.yaml
+  FILES waypoints/reverse_waypoints_real.yaml
+  DESTINATION share/${PROJECT_NAME}/waypoints
 )
 
 ament_package()
