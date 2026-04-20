@@ -75,6 +75,47 @@ One executable, four scenes via CLI argument. Each scene loads a 14-waypoint YAM
 
 YAML format (`pid_maze_solver.ros__parameters.waypoints_*`): a flat list of `14 × 3 = 42` floats in `[dx, dy, dφ]` order.
 
+## Real Robot Deployment (CyberWorld)
+
+<p align="center">
+  <img src="media/maze-waypoints-real.png" alt="Real ROSBot XL PID maze solver waypoint trace recorded in the CyberWorld physical maze" width="650"/>
+</p>
+
+The same executable runs **unmodified** on the real Husarion ROSBot XL traversing the physical maze in The Construct's **CyberWorld** lab. Scenes `2` and `4` load the hand-tuned `waypoints_real.yaml` / `reverse_waypoints_real.yaml` files that account for the real maze's geometry:
+
+1. The ROSBot XL real-robot stack (`rosbot_xl_ros` + EKF + `scan_filter_chain`) streams `/odometry/filtered` and `/scan_filtered` from CyberWorld — same topics the sim publishes
+2. The `pid_maze_solver` node is launched locally with scene `2` (forward) or `4` (reverse, default):
+
+   ```bash
+   ros2 run pid_maze_solver pid_maze_solver 2   # forward run
+   ros2 run pid_maze_solver pid_maze_solver 4   # reverse run
+   ```
+3. The TF-based pose acquisition (`tf2_ros::TransformListener` on `odom → base_link`) is source-agnostic — the real robot publishes the same TF contract as Gazebo
+4. The reactive laser safety layer becomes **critical** on the real robot:
+   - Real maze walls are not perfectly rectilinear → the front/back/left/right beam sampling catches deviations the pure PID would miss
+   - `critical_dist = 0.21 m` accounts for the physical robot footprint plus a safety margin
+   - The **target re-anchoring** (`target_pose_.head<2>() += R(φ)·correction`) is what makes the safety layer cooperative rather than combative with the PID — the goal is nudged away from the wall so the PID relaxes instead of fighting the correction
+5. The real-robot trace validates:
+   - `max_lin_vel_ = 0.18 m/s` is deliberately conservative for real-world safety
+   - `0.02 m` position tolerance + `0.02 rad` angular tolerance are reachable on hardware thanks to the 200 ms control period and the wall-clock TF lookup
+   - The 2 s inter-waypoint pause lets the real robot physically settle before the next segment — important when inertia is higher than in sim
+
+### Sim ↔ real parity
+
+| Concern | Simulation (scenes 1 / 3) | Real CyberWorld (scenes 2 / 4) |
+|---|---|---|
+| Feedback | TF `odom → base_link` | TF `odom → base_link` |
+| Safety scan | `/scan_filtered` (Gazebo plugin) | `/scan_filtered` (physical Hokuyo + filter chain) |
+| Waypoint file | `waypoints_sim.yaml`, `reverse_waypoints_sim.yaml` | `waypoints_real.yaml`, `reverse_waypoints_real.yaml` |
+| PID gains | `Kp=0.35, Ki=0.005, Kd=0.32` | same (unchanged) |
+| Arrival tolerance | `0.02 m` / `0.02 rad` | `0.02 m` / `0.02 rad` |
+| `max_lin_vel_` | `0.18 m/s` | `0.18 m/s` |
+| Critical laser distance | `0.21 m` | `0.21 m` |
+| Clock | sim time | wall clock |
+| Default scene | — | `4` (reverse CyberWorld) |
+
+The default scene in `main()` is `scene_number = 4` — the reverse CyberWorld run — so a `ros2 run pid_maze_solver pid_maze_solver` with no arguments on the real robot goes straight to the hardware reverse traversal.
+
 ## ROS 2 Interface
 
 | Name | Type | Description |
