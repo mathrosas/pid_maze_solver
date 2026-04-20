@@ -165,6 +165,10 @@ private:
       init_ = false;
       size_t twp = target_wp_ + 1;
       RCLCPP_INFO(this->get_logger(), "Moving to next waypoint: %ld", twp);
+      RCLCPP_INFO(this->get_logger(),
+                  "WP %ld: start=(%.2f, %.2f, %.2f) target=(%.2f, %.2f, %.2f)",
+                  twp, current_pose_(0), current_pose_(1), current_pose_(2),
+                  target_pose_(0), target_pose_(1), target_pose_(2));
     }
 
     // Error vector
@@ -299,8 +303,8 @@ private:
     // Transform corrections
     if (target_correction.norm() > 0.0) {
       const float dphi = current_pose_(2);
-      Eigen::Matrix2f R{{std::cos(dphi), std::sin(dphi)},
-                        {-std::sin(dphi), std::cos(dphi)}};
+      Eigen::Matrix2f R{{std::cos(dphi), -std::sin(dphi)},
+                        {std::sin(dphi), std::cos(dphi)}};
       Eigen::Vector2f tranformed_target = R * target_correction;
       target_pose_.head<2>() += tranformed_target;
     }
