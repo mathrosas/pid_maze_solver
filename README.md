@@ -1,9 +1,9 @@
 # Checkpoint 17 — PID Maze Solver
 
-ROS 2 C++ **PID waypoint follower with reactive obstacle avoidance** for the **Husarion ROSBot XL** (4-wheel mecanum / holonomic). The node solves a fixed 14-waypoint maze in four switchable scenes (simulation, real CyberWorld, plus reverse variants of each), fusing a **3-DOF PID controller** on `(x, y, φ)` with a **2D laser-scan safety layer** that nudges the velocity command away from critical front/back/left/right obstacles and simultaneously re-anchors the target pose to preserve the planned path.
+ROS 2 C++ **PID maze solver** for the **Husarion ROSBot XL** (4-wheel mecanum / holonomic). The node combines the distance and turn PID controllers into a single program that drives the robot through a hardcoded waypoint list, alternating between turn-to-heading and move-to-position states until the maze is solved. Includes a **laser-scan safety layer** for wall avoidance during the move state. Works against both the Gazebo maze world and the real CyberWorld ROSBot XL — the waypoint list is selected from a **scene number** passed as a CLI argument.
 
 <p align="center">
-  <img src="media/maze-waypoints.png" alt="PID maze solver waypoint trace through the simulation maze" width="650"/>
+  <img src="media/waypoints-sim.png" alt="PID maze solver waypoint trace through the simulation maze" width="650"/>
 </p>
 
 ## How It Works
@@ -12,42 +12,18 @@ ROS 2 C++ **PID waypoint follower with reactive obstacle avoidance** for the **H
   <img src="media/maze-world.png" alt="Gazebo maze world top view with ROSBot XL" width="600"/>
 </p>
 
-### Pose Acquisition
+### Control Loop
 
-1. A `tf2_ros::TransformListener` pulls the `odom → base_link` transform on every `odomCallback` tick — translation feeds `(x, y)`, the quaternion is reduced to yaw via `tf2::impl::getYaw`
-2. A `/scan_filtered` subscription caches the latest `sensor_msgs/LaserScan` ranges for the safety layer
-3. `got_odom_` and a non-empty range buffer gate the first control cycle
-
-### Control Cycle (`executeCallback`, 200 ms timer)
-
-1. `paused_` gate — after each waypoint a 2 s zero-twist pause is enforced before advancing
-2. Target pose updated as `target = current + waypoints_[target_wp_]` when a waypoint has just been reached (or on init)
-3. Pose error `e = target − current`, with yaw wrapped into `[-π, π]`
-4. **Two-stage waypoint arrival** — when `‖(ex, ey)‖ < 0.02 m`:
-   - If `|eφ| > 0.02 rad`, run **angular PID only**: `ω = Kp·eφ + Kd·Δeφ + Ki·∫eφ`, publish with zero linear
-   - Otherwise mark waypoint reached, advance `target_wp_`, start the 2 s pause. After the 14th waypoint the node calls `rclcpp::shutdown()`
-5. Otherwise run **linear PID on `(ex, ey)`**: `V = Kp·e + Kd·(e − e_prev) + Ki·∫e` (component-wise integral clamps `±5.0`)
-6. `recomputeTwist(V)` rotates the world-frame command into the body frame with `R(-φ)` (cos/−sin), since the robot is holonomic
-7. `performObstacleAvoidance(V)` applies the laser safety layer (see below)
-8. Final command is clamped to `max_lin_vel_ = 0.18 m/s` and published as `(v_x, v_y, ω = 0)` on `/cmd_vel`
-
-### Reactive Obstacle Avoidance
-
-`performObstacleAvoidance` samples four cardinal beams from the 720-ray scan:
-
-- front `ranges[0]`, left `ranges[179]`, back `ranges[359]`, right `ranges[579]`
-- valid range gate `[0.05, 5.0] m`, critical threshold `0.21 m`
-
-Corrections:
-
-| Condition | Velocity nudge | Target-pose nudge (rotated by `R(φ)`) |
-|---|---|---|
-| `left < 0.21` | `v_y -= 0.05` | `(0, -0.003)` |
-| `right < 0.20` | `v_y += 0.05` | `(0, +0.003)` |
-| `front < 0.20` | `v_x = -0.05` | `(-0.003, 0)` |
-| `back < 0.23` | `v_x =  0.05` | `(+0.003, 0)` |
-
-The target-pose nudge is critical: it re-centers the goal relative to the obstacle so the PID doesn't fight the safety layer on the next tick.
+1. A single-node executable `pid_maze_solver` subscribes to `/odometry/filtered` (`nav_msgs/Odometry`) and `/scan_filtered` (`sensor_msgs/LaserScan`), and publishes `geometry_msgs/Twist` on `/cmd_vel`
+2. Pose `(x, y, φ)` is pulled from the `odom → base_link` TF via a `tf2_ros::TransformListener`; yaw is extracted with `tf2::impl::getYaw`
+3. On construction it calls `select_waypoints(scene_number)` to load one of four 14-waypoint YAML files from `share/pid_maze_solver/waypoints/`
+4. Per iteration (`200 ms` timer):
+   - Pose error `e = target − current`, yaw wrapped into `[−π, π]`
+   - If `‖(ex, ey)‖ ≥ 0.02 m` → run **linear PID on `(ex, ey)`** in the world frame, rotate into the body frame with `R(−φ)`, publish `(v_x, v_y, ω = 0)`
+   - Else if `|eφ| ≥ 0.02 rad` → run **angular PID only**, publish `(0, 0, ω)` to snap the heading
+   - Otherwise mark the waypoint reached, enforce a 2 s zero-twist pause, and advance to the next
+5. Laser-scan safety layer samples four cardinal beams (front / left / back / right) and nudges both the velocity command **and** the target pose whenever a beam is inside `0.21 m`, so the PID doesn't fight the correction
+6. After the 14th waypoint, the node calls `rclcpp::shutdown()`
 
 ### PID Configuration
 
@@ -57,14 +33,15 @@ The target-pose nudge is critical: it re-centers the goal relative to the obstac
 | `Ki` | `0.005` |
 | `Kd` | `0.32`  |
 | Integral clamp `int_limit_` | `5.0` (per axis) |
-| `max_lin_vel_` | `0.18 m/s` |
-| `max_ang_vel_` | `0.5 rad/s` |
-| Position arrival | `0.02 m` |
-| Angular arrival | `0.02 rad` |
+| Max linear speed `max_lin_vel_` | `0.18 m/s` |
+| Max angular speed `max_ang_vel_` | `0.5 rad/s` |
+| Position tolerance | `0.02 m` |
+| Angular tolerance | `0.02 rad` |
+| Critical laser distance | `0.21 m` |
 
-## Scene Switching
+## Waypoint Scenes
 
-One executable, four scenes via CLI argument. Each scene loads a 14-waypoint YAML file from `share/pid_maze_solver/waypoints/`:
+One executable, four scenes via CLI argument. Each scene loads a 14-waypoint YAML file of `[dx, dy, dφ]` triplets:
 
 | `scene_number` | Waypoint file | Description |
 |---|---|---|
@@ -73,15 +50,41 @@ One executable, four scenes via CLI argument. Each scene loads a 14-waypoint YAM
 | `3` | `reverse_waypoints_sim.yaml` | Simulation — reverse |
 | `4` | `reverse_waypoints_real.yaml` | Real CyberWorld — reverse (default) |
 
-YAML format (`pid_maze_solver.ros__parameters.waypoints_*`): a flat list of `14 × 3 = 42` floats in `[dx, dy, dφ]` order.
+### Forward — Simulation / CyberWorld
+
+<p align="center">
+  <img src="media/maze-solver-sim.gif" alt="PID maze solver in the Gazebo maze world" width="650"/>
+</p>
+
+<p align="center">
+  <img src="media/maze-solver-real.gif" alt="PID maze solver on the real ROSBot XL in CyberWorld" width="650"/>
+</p>
+
+### Reverse — Simulation / CyberWorld
+
+<p align="center">
+  <img src="media/waypoints-reverse-sim.png" alt="Reverse maze solver waypoints in simulation" width="650"/>
+</p>
+
+<p align="center">
+  <img src="media/maze-solver-reverse-sim.gif" alt="Reverse PID maze solver in the Gazebo maze world" width="650"/>
+</p>
+
+<p align="center">
+  <img src="media/maze-solver-reverse-real.gif" alt="Reverse PID maze solver on the real ROSBot XL in CyberWorld" width="650"/>
+</p>
 
 ## Real Robot Deployment (CyberWorld)
 
 <p align="center">
-  <img src="media/maze-waypoints-real.png" alt="Real ROSBot XL PID maze solver waypoint trace recorded in the CyberWorld physical maze" width="650"/>
+  <img src="media/waypoints-real.png" alt="Real ROSBot XL PID maze solver waypoint trace in the CyberWorld physical maze" width="650"/>
 </p>
 
-The same executable runs **unmodified** on the real Husarion ROSBot XL traversing the physical maze in The Construct's **CyberWorld** lab. Scenes `2` and `4` load the hand-tuned `waypoints_real.yaml` / `reverse_waypoints_real.yaml` files that account for the real maze's geometry:
+<p align="center">
+  <img src="media/waypoints-reverse-real.png" alt="Real ROSBot XL reverse PID maze solver waypoint trace in the CyberWorld physical maze" width="650"/>
+</p>
+
+The same executable runs **unmodified** on the real Husarion ROSBot XL in The Construct's **CyberWorld** lab — only the scene number changes. Scenes `2` and `4` load hand-tuned waypoint files that account for the real maze's geometry:
 
 1. The ROSBot XL real-robot stack (`rosbot_xl_ros` + EKF + `scan_filter_chain`) streams `/odometry/filtered` and `/scan_filtered` from CyberWorld — same topics the sim publishes
 2. The `pid_maze_solver` node is launched locally with scene `2` (forward) or `4` (reverse, default):
@@ -90,15 +93,8 @@ The same executable runs **unmodified** on the real Husarion ROSBot XL traversin
    ros2 run pid_maze_solver pid_maze_solver 2   # forward run
    ros2 run pid_maze_solver pid_maze_solver 4   # reverse run
    ```
-3. The TF-based pose acquisition (`tf2_ros::TransformListener` on `odom → base_link`) is source-agnostic — the real robot publishes the same TF contract as Gazebo
-4. The reactive laser safety layer becomes **critical** on the real robot:
-   - Real maze walls are not perfectly rectilinear → the front/back/left/right beam sampling catches deviations the pure PID would miss
-   - `critical_dist = 0.21 m` accounts for the physical robot footprint plus a safety margin
-   - The **target re-anchoring** (`target_pose_.head<2>() += R(φ)·correction`) is what makes the safety layer cooperative rather than combative with the PID — the goal is nudged away from the wall so the PID relaxes instead of fighting the correction
-5. The real-robot trace validates:
-   - `max_lin_vel_ = 0.18 m/s` is deliberately conservative for real-world safety
-   - `0.02 m` position tolerance + `0.02 rad` angular tolerance are reachable on hardware thanks to the 200 ms control period and the wall-clock TF lookup
-   - The 2 s inter-waypoint pause lets the real robot physically settle before the next segment — important when inertia is higher than in sim
+3. The reactive laser safety layer is **critical** on the real robot — real maze walls are not perfectly rectilinear, so the front / back / left / right beam sampling catches deviations the pure PID would miss
+4. The 2 s inter-waypoint pause lets the real robot physically settle before the next segment — inertia is higher than in sim
 
 ### Sim ↔ real parity
 
@@ -108,13 +104,9 @@ The same executable runs **unmodified** on the real Husarion ROSBot XL traversin
 | Safety scan | `/scan_filtered` (Gazebo plugin) | `/scan_filtered` (physical Hokuyo + filter chain) |
 | Waypoint file | `waypoints_sim.yaml`, `reverse_waypoints_sim.yaml` | `waypoints_real.yaml`, `reverse_waypoints_real.yaml` |
 | PID gains | `Kp=0.35, Ki=0.005, Kd=0.32` | same (unchanged) |
-| Arrival tolerance | `0.02 m` / `0.02 rad` | `0.02 m` / `0.02 rad` |
-| `max_lin_vel_` | `0.18 m/s` | `0.18 m/s` |
-| Critical laser distance | `0.21 m` | `0.21 m` |
+| Tolerance | `0.02 m` / `0.02 rad` | `0.02 m` / `0.02 rad` |
 | Clock | sim time | wall clock |
 | Default scene | — | `4` (reverse CyberWorld) |
-
-The default scene in `main()` is `scene_number = 4` — the reverse CyberWorld run — so a `ros2 run pid_maze_solver pid_maze_solver` with no arguments on the real robot goes straight to the hardware reverse traversal.
 
 ## ROS 2 Interface
 
@@ -192,13 +184,13 @@ ros2 run tf2_ros tf2_echo odom base_link
 
 ## Key Concepts Covered
 
+- **Two-state PID solver**: turn-to-heading + move-to-position alternation with a shared arrival gate
 - **3-DOF PID on `(x, y, φ)`** with per-axis integral wind-up clamp and discrete derivative
-- **World → body frame rotation** via `R(-φ)` before publishing the holonomic command
-- **Two-stage arrival** — position first, then angular-only PID to snap heading before advancing
+- **World → body frame rotation** via `R(−φ)` before publishing the holonomic command
 - **TF-based pose acquisition** — `tf2_ros::TransformListener` pulling `odom → base_link` instead of reading pose directly from the odometry message
 - **Reactive laser safety layer** — cardinal-beam sampling on a filtered 720-ray scan, velocity nudge + target re-anchor
-- **Multi-scene deployment** — one executable reads a scene-specific YAML waypoint file at startup, handles sim/real/forward/reverse
-- **MultiThreadedExecutor** so the 200 ms control timer, TF callbacks, odom and scan callbacks can all progress concurrently
+- **Multi-scene deployment** — one executable reads a scene-specific YAML waypoint file at startup, handles sim / real / forward / reverse
+- **MultiThreadedExecutor** so the control timer, TF callbacks, odom and scan callbacks can all progress concurrently
 
 ## Technologies
 
@@ -206,4 +198,4 @@ ros2 run tf2_ros tf2_echo odom base_link
 - C++ 17 (`rclcpp`, `tf2`, `tf2_ros`, `nav_msgs`, `sensor_msgs`, `geometry_msgs`)
 - Eigen 3 (state vectors + rotation matrices)
 - `yaml-cpp` (waypoint loading)
-- Husarion ROSBot XL (4-wheel mecanum) + filtered 2D laser in Gazebo Sim + CyberWorld
+- Husarion ROSBot XL (4-wheel mecanum) in Gazebo Sim + CyberWorld
