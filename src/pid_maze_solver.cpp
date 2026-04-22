@@ -136,6 +136,7 @@ private:
   sensor_msgs::msg::LaserScan::SharedPtr latest_scan_;
   const double laser_yaw_in_base_{M_PI};
   const double sector_half_width_{30.0 * M_PI / 180.0};
+  double stop_distance_{0.21};
   double correction_distance_{0.21};
   double slow_distance_{0.5};
   double correction_speed_{0.05};
@@ -254,28 +255,43 @@ private:
   }
 
   void setup_scene() {
-    pid_x_ = {0.35, 0.005, 0.32};
-    pid_y_ = {0.35, 0.005, 0.32};
-    pid_yaw_ = {0.7, 0.001, 0.25};
-    max_angular_vel_ = 3.14;
-    max_linear_vel_ = 0.80;
     correction_distance_ = 0.21;
+    stop_distance_ = 0.21;
     slow_distance_ = 0.5;
     correction_speed_ = 0.05;
     target_nudge_step_ = 0.003;
+    anti_drift_ = false;
 
     switch (scene_number_) {
     case 1:
-    case 3:
+    case 3: {
+      pid_x_ = {2.5, 0.005, 0.3};
+      pid_y_ = {2.5, 0.005, 0.3};
+      pid_yaw_ = {1.3, 0.001, 0.3};
       antenna_center_ = -161.0 * M_PI / 180.0;
+
+      max_angular_vel_ = 3.14;
+      max_linear_vel_ = 0.8;
       angular_vel_tolerance_ = 0.02;
       break;
+    }
+
     case 2:
-    case 4:
+    case 4: {
+      pid_x_ = {2.1, 0.001, 0.3};
+      pid_y_ = {2.1, 0.001, 0.3};
+      pid_yaw_ = {1.25, 0.001, 0.3};
       antenna_center_ = -170.0 * M_PI / 180.0;
+      stop_distance_ = 0.175;
+      correction_distance_ = stop_distance_;
+
+      max_angular_vel_ = 1.4;
+      max_linear_vel_ = 0.45;
       angular_vel_tolerance_ = 0.05;
       anti_drift_ = true;
       break;
+    }
+
     default:
       RCLCPP_FATAL(get_logger(), "Invalid scene_number: %d", scene_number_);
       throw std::runtime_error("Invalid scene_number");
@@ -552,9 +568,9 @@ private:
       return;
     }
 
-    const double scale = std::clamp((nearest - correction_distance_) /
-                                        (slow_distance_ - correction_distance_),
-                                    0.0, 1.0);
+    const double scale = std::clamp(
+        (nearest - correction_distance_) / (slow_distance_ - correction_distance_),
+        0.0, 1.0);
     const double v_cap = scale * max_linear_vel_;
 
     if (v_norm > v_cap) {
